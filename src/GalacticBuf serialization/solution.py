@@ -4,7 +4,7 @@ import sys
 
 @dataclass
 class GBList:
-    element_type: int               # 0x01, 0x02, or 0x04
+    element_type: int
     elements: List["GBValue"]
 
 
@@ -60,10 +60,6 @@ def write_i64(buf: bytearray, v: int) -> None:
     for shift in range(56, -1, -8):
         buf.append((u >> shift) & 0xFF)
 
-
-# =========================
-#   Serialization helpers
-# =========================
 
 def write_string_value(buf: bytearray, s: str) -> None:
     b = s.encode("utf-8")

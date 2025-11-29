@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Response, HTTPException
 
-from GalacticBuf_serialization.solution import (
+from GalacticBuf_serialization.serialization import (
     # For decoding:
     parse_cli_args_to_object,            # BUT we need custom decoder, so we implement it below
     GBObject,

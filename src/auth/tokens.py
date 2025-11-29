@@ -1,13 +1,13 @@
 import secrets
 
-_tokens = {}  # token → username
+class TokenManager:
+    def __init__(self):
+        self.tokens = {} 
 
+    def generate(self, username: str) -> str:
+        token = secrets.token_hex(16)
+        self.tokens[token] = username
+        return token
 
-def issue_token(username: str) -> str:
-    token = secrets.token_hex(32)
-    _tokens[token] = username
-    return token
-
-
-def validate_token(token: str) -> str | None:
-    return _tokens.get(token)
+    def validate(self, token: str):
+        return self.tokens.get(token)

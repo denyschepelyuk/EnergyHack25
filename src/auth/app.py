@@ -1,162 +1,102 @@
-from fastapi import APIRouter, Response, HTTPException
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse
 
-from GalacticBuf_serialization.solution import (
-    # For decoding:
-    parse_cli_args_to_object,            # BUT we need custom decoder, so we implement it below
-    GBObject,
-    GBValue,
-    serialize_message
+from src.GalacticBuf_serialization.serialization import (
+    GBObject, GBValue, serialize_message
 )
+from src.auth.storage import UserStorage
+from src.auth.tokens import TokenManager
 
-from .storage import (
-    user_exists,
-    create_user,
-    get_user_password,
-    verify_password,
-)
+app = FastAPI()
 
-from .tokens import (
-    issue_token,
-)
-
-router = APIRouter()
+storage = UserStorage()
+tokens = TokenManager()
 
 
-# ------------------------------------------------------------
-# Helper: decode incoming GalacticBuf -> Python dict
-# (minimal implementation for our specific auth format)
-# ------------------------------------------------------------
-def decode_galacticbuf(raw: bytes) -> dict:
-    """
-    Your serializer encodes messages as:
-      0x01 | field_count | total_len | [field blocks...]
+async def parse_galacticbuf(request: Request):
+    body = await request.body()
 
-    Each field block:
-      name_len | name | value
+    if len(body) < 4:
+        raise ValueError("Invalid GalacticBuf message")
 
-    We decode only simple cases needed for auth:
-      - string values
-      - int values (for token expiry if needed)
-    """
+    version = body[0]
+    if version != 0x01:
+        raise ValueError("Wrong GB version")
 
-    pos = 0
+    field_count = body[1]
+    idx = 4 
 
-    if raw[pos] != 0x01:
-        raise ValueError("Invalid magic byte")
-    pos += 1
-
-    field_count = raw[pos]
-    pos += 1
-
-    total_len = (raw[pos] << 8) | raw[pos + 1]
-    pos += 2
-
-    result = {}
+    output = {}
 
     for _ in range(field_count):
-        name_len = raw[pos]
-        pos += 1
+        name_len = body[idx]
+        idx += 1
 
-        name = raw[pos:pos + name_len].decode("utf-8")
-        pos += name_len
+        name = body[idx:idx + name_len].decode("utf-8")
+        idx += name_len
 
-        val_type = raw[pos]
-        pos += 1
+        field_type = body[idx]
+        idx += 1
 
-        # INT -------------------------------------------------
-        if val_type == GBValue.TYPE_INT:
-            # 8 bytes signed big-endian
-            num = int.from_bytes(raw[pos:pos + 8], "big", signed=True)
-            pos += 8
-            result[name] = num
+        if field_type == 0x01:
+            val = int.from_bytes(body[idx:idx + 8], "big", signed=True)
+            idx += 8
+            output[name] = val
 
-        # STRING ----------------------------------------------
-        elif val_type == GBValue.TYPE_STRING:
-            strlen = (raw[pos] << 8) | raw[pos + 1]
-            pos += 2
-            s = raw[pos:pos + strlen].decode("utf-8")
-            pos += strlen
-            result[name] = s
+        elif field_type == 0x02:
+            str_len = int.from_bytes(body[idx:idx + 2], "big")
+            idx += 2
+            val = body[idx:idx + str_len].decode("utf-8")
+            idx += str_len
+            output[name] = val
 
         else:
-            raise ValueError("Unsupported type in decoder")
+            raise ValueError("Unsupported type in this mission")
 
-    return result
-
-
-# ------------------------------------------------------------
-# Helper: encode Python dict -> GalacticBuf
-# ------------------------------------------------------------
-def encode_galacticbuf(data: dict) -> bytes:
-    fields = []
-
-    for key, value in data.items():
-        if isinstance(value, int):
-            fields.append((key, GBValue.make_int(value)))
-
-        elif isinstance(value, str):
-            fields.append((key, GBValue.make_string(value)))
-
-        else:
-            raise ValueError(f"Unsupported value type: {type(value)}")
-
-    obj = GBObject(fields=fields)
-    return serialize_message(obj)
+    return output
 
 
-# ============================================================
-#  REGISTER
-# ============================================================
-@router.post("/register")
-def register_handler(raw: bytes):
-    # Decode request
+@app.post("/register")
+async def register(request: Request):
     try:
-        data = decode_galacticbuf(raw)
-        username = data["username"]
-        password = data["password"]
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid GalacticBuf payload")
+        data = await parse_galacticbuf(request)
+    except:
+        return Response(status_code=400)
 
-    # Validate
+    username = data.get("username")
+    password = data.get("password")
+
     if not username or not password:
-        raise HTTPException(status_code=400, detail="Empty username or password")
+        return Response(status_code=400)
 
-    if user_exists(username):
-        raise HTTPException(status_code=409, detail="Username already exists")
+    if not storage.add_user(username, password):
+        return Response(status_code=409)
 
-    # Create user
-    create_user(username, password)
-
-    return Response(status_code=204)  # No Content
+    return Response(status_code=204)
 
 
-# ============================================================
-#  LOGIN
-# ============================================================
-@router.post("/login")
-def login_handler(raw: bytes):
-    # Decode request
+@app.post("/login")
+async def login(request: Request):
     try:
-        data = decode_galacticbuf(raw)
-        username = data["username"]
-        password = data["password"]
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid GalacticBuf payload")
+        data = await parse_galacticbuf(request)
+    except:
+        return Response(status_code=400)
 
-    stored_pw = get_user_password(username)
-    if stored_pw is None or not verify_password(password, stored_pw):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    username = data.get("username")
+    password = data.get("password")
 
-    # Generate token
-    token = issue_token(username)
+    if not storage.validate_user(username, password):
+        return Response(status_code=401)
 
-    # Encode GalacticBuf response
-    response_buf = encode_galacticbuf({
-        "token": token
-    })
+    token = tokens.generate(username)
+
+    obj = GBObject([
+        ("token", GBValue.make_string(token))
+    ])
+    message = serialize_message(obj)
 
     return Response(
-        content=response_buf,
+        content=message,
         media_type="application/x-galacticbuf",
         status_code=200
     )

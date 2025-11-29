@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, Response
 from src.GalacticBuf_serialization.serialization import (
     GBObject, GBValue, serialize_message
 )
-from src.market.storage import OrderBook
+from storage import OrderBook
 
 app = FastAPI()
 order_book = OrderBook()

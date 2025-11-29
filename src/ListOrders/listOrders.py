@@ -11,7 +11,7 @@ def handle_get_orders(delivery_start: int, delivery_end: int, orders: List[dict]
     
     filtered_orders = [
         o for o in orders 
-        if o['ds'] == delivery_start and o['de'] == delivery_end
+        if o['ds'] >= delivery_start and o['de'] <= delivery_end
     ]
     
     filtered_orders.sort(key=lambda x: x['price'])

@@ -295,16 +295,53 @@ def parse_message(data: bytes) -> GBObject:
     return obj
 
 
+def pretty_print_message(data: bytes) -> None:
+    from textwrap import indent
+
+    print("Raw hex:")
+    print("  " + " ".join(f"{b:02X}" for b in data))
+    print()
+
+    obj = parse_message(data)
+
+    # Header
+    version = data[0]
+    field_count = data[1]
+    total_len = (data[2] << 8) | data[3]
+
+    print("Header (4 bytes):")
+    print(f"  {version:02X}           - Protocol version")
+    print(f"  {field_count:02X}           - {field_count} fields")
+    print(f"  {data[2]:02X} {data[3]:02X}        - Total length: {total_len} bytes")
+    print()
+
+    print("Fields:")
+    for name, val in obj.fields:
+        print(f"- Field - {name}:")
+        if val.type == GBValue.TYPE_INT:
+            print(f"    Type: Integer (0x01), Value: {val.int_value}")
+        elif val.type == GBValue.TYPE_STRING:
+            b = val.string_value.encode("utf-8")
+            print("    Type: String (0x02)")
+            print(f"    Length: {len(b)}")
+            print(f"    UTF-8: {val.string_value!r}")
+        elif val.type == GBValue.TYPE_LIST:
+            print("    Type: List (0x03)")
+            print(f"    Element type: 0x{val.list_value.element_type:02X}")
+            print(f"    Element count: {len(val.list_value.elements)}")
+        elif val.type == GBValue.TYPE_OBJECT:
+            print("    Type: Object (0x04)")
+        print()
+
+
 # =========================
 #   Small usage example
 # =========================
 
 if __name__ == "__main__":
-    # Message: user_id=1001, name="Alice", scores=[100, 200, 300]
     msg = GBObject()
     msg.fields.append(("user_id", GBValue.make_int(1001)))
     msg.fields.append(("name", GBValue.make_string("Alice")))
-
     scores_vals = [
         GBValue.make_int(100),
         GBValue.make_int(200),
@@ -313,21 +350,4 @@ if __name__ == "__main__":
     msg.fields.append(("scores", GBValue.make_list(GBValue.TYPE_INT, scores_vals)))
 
     encoded = serialize_message(msg)
-    print("Encoded length:", len(encoded))
-    print("Encoded hex:", " ".join(f"{b:02X}" for b in encoded))
-
-    decoded = parse_message(encoded)
-    print("Decoded fields:")
-    for name, val in decoded.fields:
-        if val.type == GBValue.TYPE_INT:
-            print(name, "=", val.int_value)
-        elif val.type == GBValue.TYPE_STRING:
-            print(name, "=", val.string_value)
-        elif val.type == GBValue.TYPE_LIST:
-            print(
-                name,
-                "=",
-                [e.int_value for e in val.list_value.elements]
-                if val.list_value.element_type == GBValue.TYPE_INT
-                else "...",
-            )
+    pretty_print_message(encoded)

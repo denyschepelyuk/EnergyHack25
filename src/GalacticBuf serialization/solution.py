@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import sys
 
-
 # =========================
 #   Core Data Structures
 # =========================
@@ -159,24 +158,128 @@ def serialize_message(obj: GBObject) -> bytes:
 #   CLI parsing
 # =========================
 
+def split_top_level_fields(s: str) -> List[str]:
+    """
+    Split the whole CLI string into top-level 'key=value' tokens,
+    splitting on spaces that are not inside [] or {}.
+    """
+    fields = []
+    current = []
+    depth = 0  # nesting depth for [] and {}
+
+    for ch in s:
+        if ch in "[{":
+            depth += 1
+            current.append(ch)
+        elif ch in "]}":
+            depth -= 1
+            current.append(ch)
+        elif ch == " " and depth == 0:
+            if current:
+                fields.append("".join(current).strip())
+                current = []
+        else:
+            current.append(ch)
+
+    if current:
+        fields.append("".join(current).strip())
+
+    return fields
+
+
+def split_top_level_items(s: str) -> List[str]:
+    """
+    Split a list or object inner content into items, separated by commas or spaces,
+    but ignore separators inside nested [] or {}.
+    """
+    items = []
+    current = []
+    depth = 0
+
+    for ch in s:
+        if ch in "[{":
+            depth += 1
+            current.append(ch)
+        elif ch in "]}":
+            depth -= 1
+            current.append(ch)
+        elif (ch == "," or ch == " ") and depth == 0:
+            if current:
+                items.append("".join(current).strip())
+                current = []
+        else:
+            current.append(ch)
+
+    if current:
+        items.append("".join(current).strip())
+
+    # Remove empty items
+    return [it for it in items if it]
+
+
+def parse_scalar_value(value_str: str) -> GBValue:
+    value_str = value_str.strip()
+    # Try int
+    try:
+        v = int(value_str)
+        return GBValue.make_int(v)
+    except ValueError:
+        pass
+
+    # String (strip quotes if present)
+    s = value_str
+    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+        s = s[1:-1]
+    return GBValue.make_string(s)
+
+
+def parse_object_from_string(inner: str) -> GBObject:
+    """
+    Parse something like "id:1, price:100" into a GBObject.
+    Values inside objects are treated as scalars (int or string).
+    """
+    obj = GBObject()
+    parts = split_top_level_items(inner)
+    for part in parts:
+        if ":" not in part:
+            continue
+        name, val_str = part.split(":", 1)
+        name = name.strip()
+        val_str = val_str.strip()
+        if not name:
+            raise ValueError("Empty object field name")
+        val = parse_scalar_value(val_str)
+        obj.fields.append((name, val))
+    return obj
+
+
 def parse_value_from_string(value_str: str) -> GBValue:
     value_str = value_str.strip()
 
-    # List: [a,b,c]
-    if value_str.startswith('[') and value_str.endswith(']'):
+    # List: [ ... ]
+    if value_str.startswith("[") and value_str.endswith("]"):
         inner = value_str[1:-1].strip()
         if not inner:
-            # empty list -> default to list-of-strings
+            # empty list -> list of strings by default
             return GBValue.make_list(GBValue.TYPE_STRING, [])
 
-        parts = [p.strip() for p in inner.split(',')]
+        items = split_top_level_items(inner)
 
-        # Try int list
+        # List of objects?  [{...} {...}] or [{...}, {...}]
+        if all(it.startswith("{") and it.endswith("}") for it in items):
+            objs: List[GBValue] = []
+            for it in items:
+                inner_obj = it[1:-1].strip()
+                obj = parse_object_from_string(inner_obj)
+                objs.append(GBValue.make_object(obj))
+            return GBValue.make_list(GBValue.TYPE_OBJECT, objs)
+
+        # Try list of ints
         all_int = True
-        int_vals = []
-        for p in parts:
+        int_vals: List[int] = []
+        for it in items:
             try:
-                int_vals.append(int(p))
+                int_vals.append(int(it))
             except ValueError:
                 all_int = False
                 break
@@ -185,44 +288,44 @@ def parse_value_from_string(value_str: str) -> GBValue:
             elems = [GBValue.make_int(v) for v in int_vals]
             return GBValue.make_list(GBValue.TYPE_INT, elems)
 
-        # Otherwise treat as list of strings (optionally strip quotes)
-        str_elems = []
-        for p in parts:
-            if len(p) >= 2 and ((p[0] == '"' and p[-1] == '"') or (p[0] == "'" and p[-1] == "'")):
-                p = p[1:-1]
-            str_elems.append(GBValue.make_string(p))
+        # Otherwise list of strings
+        str_elems: List[GBValue] = []
+        for it in items:
+            s = it
+            if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+                s = s[1:-1]
+            str_elems.append(GBValue.make_string(s))
         return GBValue.make_list(GBValue.TYPE_STRING, str_elems)
 
-    # Scalar: try int first
-    try:
-        v = int(value_str)
-        return GBValue.make_int(v)
-    except ValueError:
-        pass
-
-    # Scalar string (strip optional quotes)
-    s = value_str
-    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
-        s = s[1:-1]
-    return GBValue.make_string(s)
+    # Scalar (int or string)
+    return parse_scalar_value(value_str)
 
 
 def parse_cli_args_to_object(argv: List[str]) -> GBObject:
     """
-    Expect arguments like:
+    Parse command line arguments into a GBObject.
+
+    Examples that work:
       user_id=1001 name=Alice scores=[100,200,300]
-    Each arg is one field (no commas required).
+      timestamp=1698765432 trades=[{id:1,price:100},{id:2,price:200}]
+      timestamp=1698765432 trades=[{id:1, price:100} {id:2, price:200}]
     """
+    cmdline = " ".join(argv).strip()
     obj = GBObject()
 
-    for arg in argv:
-        arg = arg.strip().rstrip(',')  # allow trailing comma
-        if not arg:
-            continue
-        if '=' not in arg:
-            raise ValueError(f"Invalid argument (expected key=value): {arg!r}")
+    if not cmdline:
+        return obj
 
-        name, value_str = arg.split('=', 1)
+    tokens = split_top_level_fields(cmdline)
+
+    for token in tokens:
+        token = token.strip().rstrip(",")
+        if not token:
+            continue
+        if "=" not in token:
+            raise ValueError(f"Invalid argument (expected key=value): {token!r}")
+
+        name, value_str = token.split("=", 1)
         name = name.strip()
         value_str = value_str.strip()
 
@@ -240,9 +343,7 @@ def parse_cli_args_to_object(argv: List[str]) -> GBObject:
 # =========================
 
 if __name__ == "__main__":
-    # Build GBObject from CLI args
     obj = parse_cli_args_to_object(sys.argv[1:])
-
-    # Serialize and write **raw bytes** to stdout
     encoded = serialize_message(obj)
+    # Write raw GalacticBuf bytes to stdout (no extra prints!)
     sys.stdout.buffer.write(encoded)

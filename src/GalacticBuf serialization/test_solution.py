@@ -2,7 +2,10 @@ from solution import GBObject, GBValue, serialize_message, parse_cli_args_to_obj
 
 # Simulate CLI args: user_id=1001, name=Alice, scores=[100,200,300]
 # args = ["user_id=1001", "name=Alice", "scores=[100,200,300]"]
-args = ["timestamp=1698765432", "trades=[{id:1, price:100}, {id:2, price:200}]"]
+args = [
+        "timestamp=1698765432",
+        "trades=[{id:1, price:100}, {id:2, price:200}]"
+]
 
 obj = parse_cli_args_to_object(args)
 data = serialize_message(obj)

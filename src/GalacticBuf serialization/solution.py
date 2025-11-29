@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+import sys
 
 
 # =========================
@@ -15,12 +16,6 @@ class GBList:
 @dataclass
 class GBObject:
     fields: List[Tuple[str, "GBValue"]] = field(default_factory=list)
-
-    def get(self, name: str) -> Optional["GBValue"]:
-        for k, v in self.fields:
-            if k == name:
-                return v
-        return None
 
 
 @dataclass
@@ -75,41 +70,8 @@ def write_i64(buf: bytearray, v: int) -> None:
         buf.append((u >> shift) & 0xFF)
 
 
-class Buffer:
-    def __init__(self, data: bytes):
-        self.data = data
-        self.pos = 0
-
-    def read_u8(self) -> int:
-        if self.pos >= len(self.data):
-            raise ValueError("Unexpected EOF while reading u8")
-        v = self.data[self.pos]
-        self.pos += 1
-        return v
-
-    def read_u16(self) -> int:
-        if self.pos + 2 > len(self.data):
-            raise ValueError("Unexpected EOF while reading u16")
-        hi = self.data[self.pos]
-        lo = self.data[self.pos + 1]
-        self.pos += 2
-        return (hi << 8) | lo
-
-    def read_i64(self) -> int:
-        if self.pos + 8 > len(self.data):
-            raise ValueError("Unexpected EOF while reading i64")
-        v = 0
-        for _ in range(8):
-            v = (v << 8) | self.data[self.pos]
-            self.pos += 1
-        # Convert from unsigned to signed
-        if v & (1 << 63):
-            v -= 1 << 64
-        return v
-
-
 # =========================
-#   Serialization
+#   Serialization helpers
 # =========================
 
 def write_string_value(buf: bytearray, s: str) -> None:
@@ -170,7 +132,6 @@ def serialize_message(obj: GBObject) -> bytes:
     """
     Serialize a top-level GBObject into a GalacticBuf message (with 4-byte header).
     """
-    # Encode body (fields only)
     body = bytearray()
     for name, val in obj.fields:
         name_bytes = name.encode("utf-8")
@@ -195,159 +156,93 @@ def serialize_message(obj: GBObject) -> bytes:
 
 
 # =========================
-#   Deserialization
+#   CLI parsing
 # =========================
 
-def read_string_value(b: Buffer) -> str:
-    ln = b.read_u16()
-    if b.pos + ln > len(b.data):
-        raise ValueError("Unexpected EOF while reading string")
-    s = b.data[b.pos:b.pos + ln].decode("utf-8")
-    b.pos += ln
-    return s
+def parse_value_from_string(value_str: str) -> GBValue:
+    value_str = value_str.strip()
+
+    # List: [a,b,c]
+    if value_str.startswith('[') and value_str.endswith(']'):
+        inner = value_str[1:-1].strip()
+        if not inner:
+            # empty list -> default to list-of-strings
+            return GBValue.make_list(GBValue.TYPE_STRING, [])
+
+        parts = [p.strip() for p in inner.split(',')]
+
+        # Try int list
+        all_int = True
+        int_vals = []
+        for p in parts:
+            try:
+                int_vals.append(int(p))
+            except ValueError:
+                all_int = False
+                break
+
+        if all_int:
+            elems = [GBValue.make_int(v) for v in int_vals]
+            return GBValue.make_list(GBValue.TYPE_INT, elems)
+
+        # Otherwise treat as list of strings (optionally strip quotes)
+        str_elems = []
+        for p in parts:
+            if len(p) >= 2 and ((p[0] == '"' and p[-1] == '"') or (p[0] == "'" and p[-1] == "'")):
+                p = p[1:-1]
+            str_elems.append(GBValue.make_string(p))
+        return GBValue.make_list(GBValue.TYPE_STRING, str_elems)
+
+    # Scalar: try int first
+    try:
+        v = int(value_str)
+        return GBValue.make_int(v)
+    except ValueError:
+        pass
+
+    # Scalar string (strip optional quotes)
+    s = value_str
+    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+        s = s[1:-1]
+    return GBValue.make_string(s)
 
 
-def read_list_value(b: Buffer) -> GBList:
-    elem_type = b.read_u8()
-    if elem_type not in (GBValue.TYPE_INT, GBValue.TYPE_STRING, GBValue.TYPE_OBJECT):
-        raise ValueError("Invalid list element type")
-
-    count = b.read_u16()
-    elems: List[GBValue] = []
-
-    for _ in range(count):
-        if elem_type == GBValue.TYPE_INT:
-            v = GBValue.make_int(b.read_i64())
-        elif elem_type == GBValue.TYPE_STRING:
-            v = GBValue.make_string(read_string_value(b))
-        else:  # OBJECT
-            v = GBValue.make_object(parse_object_no_header(b))
-        elems.append(v)
-
-    return GBList(elem_type, elems)
-
-
-def read_value(b: Buffer) -> GBValue:
-    t = b.read_u8()
-    if t == GBValue.TYPE_INT:
-        return GBValue.make_int(b.read_i64())
-    elif t == GBValue.TYPE_STRING:
-        return GBValue.make_string(read_string_value(b))
-    elif t == GBValue.TYPE_LIST:
-        lst = read_list_value(b)
-        return GBValue.make_list(lst.element_type, lst.elements)
-    elif t == GBValue.TYPE_OBJECT:
-        return GBValue.make_object(parse_object_no_header(b))
-    else:
-        raise ValueError("Unknown value type while parsing")
-
-
-def parse_object_no_header(b: Buffer) -> GBObject:
-    field_count = b.read_u8()
-    obj = GBObject()
-    for _ in range(field_count):
-        name_len = b.read_u8()
-        if name_len == 0:
-            raise ValueError("Field name length cannot be zero")
-        if b.pos + name_len > len(b.data):
-            raise ValueError("Unexpected EOF while reading field name")
-        name = b.data[b.pos:b.pos + name_len].decode("utf-8")
-        b.pos += name_len
-
-        val = read_value(b)
-        obj.fields.append((name, val))
-    return obj
-
-
-def parse_message(data: bytes) -> GBObject:
+def parse_cli_args_to_object(argv: List[str]) -> GBObject:
     """
-    Parse a full GalacticBuf message (with 4-byte header) into a GBObject.
+    Expect arguments like:
+      user_id=1001 name=Alice scores=[100,200,300]
+    Each arg is one field (no commas required).
     """
-    if len(data) < 4:
-        raise ValueError("Buffer too small for header")
-
-    b = Buffer(data)
-    version = b.read_u8()
-    if version != 0x01:
-        raise ValueError("Unsupported protocol version")
-
-    field_count = b.read_u8()
-    total_len = b.read_u16()
-    if total_len != len(data):
-        raise ValueError("Total length mismatch")
-
     obj = GBObject()
-    for _ in range(field_count):
-        name_len = b.read_u8()
-        if name_len == 0:
-            raise ValueError("Field name length cannot be zero")
-        if b.pos + name_len > len(data):
-            raise ValueError("Unexpected EOF while reading field name")
-        name = b.data[b.pos:b.pos + name_len].decode("utf-8")
-        b.pos += name_len
 
-        val = read_value(b)
+    for arg in argv:
+        arg = arg.strip().rstrip(',')  # allow trailing comma
+        if not arg:
+            continue
+        if '=' not in arg:
+            raise ValueError(f"Invalid argument (expected key=value): {arg!r}")
+
+        name, value_str = arg.split('=', 1)
+        name = name.strip()
+        value_str = value_str.strip()
+
+        if not name:
+            raise ValueError("Empty field name")
+
+        val = parse_value_from_string(value_str)
         obj.fields.append((name, val))
-
-    if b.pos != len(data):
-        raise ValueError("Extra bytes after parsing message")
 
     return obj
 
 
-def pretty_print_message(data: bytes) -> None:
-    from textwrap import indent
-
-    print("Raw hex:")
-    print("  " + " ".join(f"{b:02X}" for b in data))
-    print()
-
-    obj = parse_message(data)
-
-    # Header
-    version = data[0]
-    field_count = data[1]
-    total_len = (data[2] << 8) | data[3]
-
-    print("Header (4 bytes):")
-    print(f"  {version:02X}           - Protocol version")
-    print(f"  {field_count:02X}           - {field_count} fields")
-    print(f"  {data[2]:02X} {data[3]:02X}        - Total length: {total_len} bytes")
-    print()
-
-    print("Fields:")
-    for name, val in obj.fields:
-        print(f"- Field - {name}:")
-        if val.type == GBValue.TYPE_INT:
-            print(f"    Type: Integer (0x01), Value: {val.int_value}")
-        elif val.type == GBValue.TYPE_STRING:
-            b = val.string_value.encode("utf-8")
-            print("    Type: String (0x02)")
-            print(f"    Length: {len(b)}")
-            print(f"    UTF-8: {val.string_value!r}")
-        elif val.type == GBValue.TYPE_LIST:
-            print("    Type: List (0x03)")
-            print(f"    Element type: 0x{val.list_value.element_type:02X}")
-            print(f"    Element count: {len(val.list_value.elements)}")
-        elif val.type == GBValue.TYPE_OBJECT:
-            print("    Type: Object (0x04)")
-        print()
-
-
 # =========================
-#   Small usage example
+#   Main
 # =========================
 
 if __name__ == "__main__":
-    msg = GBObject()
-    msg.fields.append(("user_id", GBValue.make_int(1001)))
-    msg.fields.append(("name", GBValue.make_string("Alice")))
-    scores_vals = [
-        GBValue.make_int(100),
-        GBValue.make_int(200),
-        GBValue.make_int(300),
-    ]
-    msg.fields.append(("scores", GBValue.make_list(GBValue.TYPE_INT, scores_vals)))
+    # Build GBObject from CLI args
+    obj = parse_cli_args_to_object(sys.argv[1:])
 
-    encoded = serialize_message(msg)
-    pretty_print_message(encoded)
+    # Serialize and write **raw bytes** to stdout
+    encoded = serialize_message(obj)
+    sys.stdout.buffer.write(encoded)

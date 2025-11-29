@@ -100,3 +100,9 @@ async def login(request: Request):
         media_type="application/x-galacticbuf",
         status_code=200
     )
+
+
+
+@app.get("/health")
+async def health():
+    return PlainTextResponse("", status_code=200)

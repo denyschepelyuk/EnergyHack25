@@ -2,10 +2,6 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import sys
 
-# =========================
-#   Core Data Structures
-# =========================
-
 @dataclass
 class GBList:
     element_type: int               # 0x01, 0x02, or 0x04
@@ -46,10 +42,6 @@ class GBValue:
     def make_object(obj: GBObject) -> "GBValue":
         return GBValue(type=GBValue.TYPE_OBJECT, object_value=obj)
 
-
-# =========================
-#   Low-level helpers
-# =========================
 
 def write_u8(buf: bytearray, v: int) -> None:
     buf.append(v & 0xFF)

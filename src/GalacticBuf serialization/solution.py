@@ -2,13 +2,9 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import sys
 
-# =========================
-#   Core Data Structures
-# =========================
-
 @dataclass
 class GBList:
-    element_type: int               # 0x01, 0x02, or 0x04
+    element_type: int
     elements: List["GBValue"]
 
 
@@ -47,10 +43,6 @@ class GBValue:
         return GBValue(type=GBValue.TYPE_OBJECT, object_value=obj)
 
 
-# =========================
-#   Low-level helpers
-# =========================
-
 def write_u8(buf: bytearray, v: int) -> None:
     buf.append(v & 0xFF)
 
@@ -68,10 +60,6 @@ def write_i64(buf: bytearray, v: int) -> None:
     for shift in range(56, -1, -8):
         buf.append((u >> shift) & 0xFF)
 
-
-# =========================
-#   Serialization helpers
-# =========================
 
 def write_string_value(buf: bytearray, s: str) -> None:
     b = s.encode("utf-8")
@@ -128,9 +116,6 @@ def write_value(buf: bytearray, val: GBValue) -> None:
 
 
 def serialize_message(obj: GBObject) -> bytes:
-    """
-    Serialize a top-level GBObject into a GalacticBuf message (with 4-byte header).
-    """
     body = bytearray()
     for name, val in obj.fields:
         name_bytes = name.encode("utf-8")
@@ -145,27 +130,19 @@ def serialize_message(obj: GBObject) -> bytes:
         raise ValueError("Message too large")
 
     out = bytearray()
-    # Header
-    write_u8(out, 0x01)              # Protocol version
-    write_u8(out, len(obj.fields))   # Field count
-    write_u16(out, total_len)        # Total length (includes header)
+    write_u8(out, 0x01)
+    write_u8(out, len(obj.fields))
+    write_u16(out, total_len)
 
     out.extend(body)
     return bytes(out)
 
 
-# =========================
-#   CLI parsing
-# =========================
 
 def split_top_level_fields(s: str) -> List[str]:
-    """
-    Split the whole CLI string into top-level 'key=value' tokens,
-    splitting on spaces that are not inside [] or {}.
-    """
     fields = []
     current = []
-    depth = 0  # nesting depth for [] and {}
+    depth = 0
 
     for ch in s:
         if ch in "[{":
@@ -188,10 +165,6 @@ def split_top_level_fields(s: str) -> List[str]:
 
 
 def split_top_level_items(s: str) -> List[str]:
-    """
-    Split a list or object inner content into items, separated by commas or spaces,
-    but ignore separators inside nested [] or {}.
-    """
     items = []
     current = []
     depth = 0
@@ -213,20 +186,17 @@ def split_top_level_items(s: str) -> List[str]:
     if current:
         items.append("".join(current).strip())
 
-    # Remove empty items
     return [it for it in items if it]
 
 
 def parse_scalar_value(value_str: str) -> GBValue:
     value_str = value_str.strip()
-    # Try int
     try:
         v = int(value_str)
         return GBValue.make_int(v)
     except ValueError:
         pass
 
-    # String (strip quotes if present)
     s = value_str
     if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
         s = s[1:-1]
@@ -234,10 +204,6 @@ def parse_scalar_value(value_str: str) -> GBValue:
 
 
 def parse_object_from_string(inner: str) -> GBObject:
-    """
-    Parse something like "id:1, price:100" into a GBObject.
-    Values inside objects are treated as scalars (int or string).
-    """
     obj = GBObject()
     parts = split_top_level_items(inner)
     for part in parts:
@@ -255,17 +221,13 @@ def parse_object_from_string(inner: str) -> GBObject:
 
 def parse_value_from_string(value_str: str) -> GBValue:
     value_str = value_str.strip()
-
-    # List: [ ... ]
     if value_str.startswith("[") and value_str.endswith("]"):
         inner = value_str[1:-1].strip()
         if not inner:
-            # empty list -> list of strings by default
             return GBValue.make_list(GBValue.TYPE_STRING, [])
 
         items = split_top_level_items(inner)
 
-        # List of objects?  [{...} {...}] or [{...}, {...}]
         if all(it.startswith("{") and it.endswith("}") for it in items):
             objs: List[GBValue] = []
             for it in items:
@@ -274,7 +236,6 @@ def parse_value_from_string(value_str: str) -> GBValue:
                 objs.append(GBValue.make_object(obj))
             return GBValue.make_list(GBValue.TYPE_OBJECT, objs)
 
-        # Try list of ints
         all_int = True
         int_vals: List[int] = []
         for it in items:
@@ -288,7 +249,6 @@ def parse_value_from_string(value_str: str) -> GBValue:
             elems = [GBValue.make_int(v) for v in int_vals]
             return GBValue.make_list(GBValue.TYPE_INT, elems)
 
-        # Otherwise list of strings
         str_elems: List[GBValue] = []
         for it in items:
             s = it
@@ -297,19 +257,10 @@ def parse_value_from_string(value_str: str) -> GBValue:
             str_elems.append(GBValue.make_string(s))
         return GBValue.make_list(GBValue.TYPE_STRING, str_elems)
 
-    # Scalar (int or string)
     return parse_scalar_value(value_str)
 
 
 def parse_cli_args_to_object(argv: List[str]) -> GBObject:
-    """
-    Parse command line arguments into a GBObject.
-
-    Examples that work:
-      user_id=1001 name=Alice scores=[100,200,300]
-      timestamp=1698765432 trades=[{id:1,price:100},{id:2,price:200}]
-      timestamp=1698765432 trades=[{id:1, price:100} {id:2, price:200}]
-    """
     cmdline = " ".join(argv).strip()
     obj = GBObject()
 
@@ -337,13 +288,7 @@ def parse_cli_args_to_object(argv: List[str]) -> GBObject:
 
     return obj
 
-
-# =========================
-#   Main
-# =========================
-
 if __name__ == "__main__":
     obj = parse_cli_args_to_object(sys.argv[1:])
     encoded = serialize_message(obj)
-    # Write raw GalacticBuf bytes to stdout (no extra prints!)
     sys.stdout.buffer.write(encoded)

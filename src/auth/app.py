@@ -1,24 +1,5 @@
-<<<<<<< HEAD
-from fastapi import APIRouter, Response, HTTPException
-
-from GalacticBuf_serialization.serialization import (
-    # For decoding:
-    parse_cli_args_to_object,            # BUT we need custom decoder, so we implement it below
-    GBObject,
-    GBValue,
-    serialize_message
-)
-
-from .storage import (
-    user_exists,
-    create_user,
-    get_user_password,
-    verify_password,
-)
-=======
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
->>>>>>> 7f42d39005c8175291095ce1b16096fdace51fb5
 
 from src.GalacticBuf_serialization.serialization import (
     GBObject, GBValue, serialize_message

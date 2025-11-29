@@ -6,12 +6,13 @@ from src.GalacticBuf_serialization.serialization import (
 )
 from src.auth.storage import UserStorage
 from src.auth.tokens import TokenManager
+from src.ListOrders.storage import OrderBook
 
 app = FastAPI()
 
 storage = UserStorage()
 tokens = TokenManager()
-
+order_book = OrderBook()
 
 async def parse_galacticbuf(request: Request):
     body = await request.body()
@@ -102,6 +103,43 @@ async def login(request: Request):
     )
 
 
+@app.get("/orders")
+async def get_orders(request: Request):
+    query_params = request.query_params
+    ds_str = query_params.get("delivery_start")
+    de_str = query_params.get("delivery_end")
+
+    if not ds_str or not de_str:
+        return Response(status_code=400)
+
+    try:
+        delivery_start = int(ds_str)
+        delivery_end = int(de_str)
+    except ValueError:
+        return Response(status_code=400)
+
+    orders = order_book.get_orders_by_contract(delivery_start, delivery_end)
+
+    gb_order_items = []
+    for o in orders:
+        order_obj = GBObject([
+            ("order_id", GBValue.make_string(o['order_id'])),
+            ("price", GBValue.make_int(o['price'])),
+            ("quantity", GBValue.make_int(o['quantity'])),
+            ("delivery_start", GBValue.make_int(o['ds'])),
+            ("delivery_end", GBValue.make_int(o['de']))
+        ])
+        gb_order_items.append(GBValue.make_object(order_obj))
+
+    response_obj = GBObject([
+        ("orders", GBValue.make_list(GBValue.TYPE_OBJECT, gb_order_items))
+    ])
+
+    return Response(
+        content=serialize_message(response_obj),
+        media_type="application/x-galacticbuf",
+        status_code=200
+    )
 
 @app.get("/health")
 async def health():
